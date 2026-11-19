@@ -1,11 +1,11 @@
-# Projeto #1: Temporizador Pomodoro com Métricas de Estudo
+# Projeto #13: Temporizador Pomodoro com Métricas de Estudo
 
 - **Modalidade:** Projeto Oficial Sorteado (Valendo 100 pontos)
 - **Estudante:** João Vytor Kruger
 - **Turma:** 2B
 - **RA:** 2026108220
 - **Chave Única:** `P26-2B-6518-18DF-1E0D-2810`
-- **URL_CLOUDFLARE:** PENDENTE — preencher após publicação.
+- **URL_CLOUDFLARE:** PENDENTE — preencher após deploy real.
 
 ---
 
@@ -13,7 +13,7 @@
 
 Projete um gerenciador de tempo baseado na técnica Pomodoro, alternando ciclos configuráveis de foco e descanso.
 
-O relógio regressivo deve ser controlado no frontend via setInterval e cálculo de deltas de Date.now() para evitar atrasos quando a aba do navegador estiver em segundo plano, emitindo alertas visuais ao fim de cada ciclo.
+O relógio regressivo deve ser controlado no frontend via setInterval e cálculo de deltas de Date.now() para evitar atrasos quando a aba do navegador estiver em segundo plano.
 
 Cada ciclo de foco concluído por um usuário autenticado via Discord deve ser registrado no Cloudflare D1 através de uma requisição POST, vinculando o tempo estudado a uma disciplina ou projeto específico escolhido pelo aluno.
 
