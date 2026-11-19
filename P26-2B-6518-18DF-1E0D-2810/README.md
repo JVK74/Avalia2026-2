@@ -1,18 +1,26 @@
-# Projeto #1: Projeto Oficial Sorteado (Consulte https://frankalcantara.com/projetos2026)
+# Projeto #1: Temporizador Pomodoro com Métricas de Estudo
 
 - **Modalidade:** Projeto Oficial Sorteado (Valendo 100 pontos)
-- **Estudante:** Estudante (Modo Offline)
+- **Estudante:** João Vytor Kruger
 - **Turma:** 2B
+- **RA:** 2026108220
 - **Chave Única:** `P26-2B-6518-18DF-1E0D-2810`
-- **URL_CLOUDFLARE:** `https://p26-2b-6518-18df-1e0d-2810.pages.dev` *(Atualize com a URL pública real do seu deploy na Cloudflare antes de abrir o Pull Request)*
+- **URL_CLOUDFLARE:** PENDENTE — preencher após publicação.
 
 ---
 
 ## Especificação do Projeto
 
-Substitua pela descrição oficial recebida no seu e-mail de confirmação.
+Projete um gerenciador de tempo baseado na técnica Pomodoro, alternando ciclos configuráveis de foco e descanso.
+
+O relógio regressivo deve ser controlado no frontend via setInterval e cálculo de deltas de Date.now() para evitar atrasos quando a aba do navegador estiver em segundo plano, emitindo alertas visuais ao fim de cada ciclo.
+
+Cada ciclo de foco concluído por um usuário autenticado via Discord deve ser registrado no Cloudflare D1 através de uma requisição POST, vinculando o tempo estudado a uma disciplina ou projeto específico escolhido pelo aluno.
+
+A interface deve consultar o histórico no servidor para exibir o total de horas acumuladas na semana e a distribuição de esforço entre as disciplinas cadastradas.
 
 ---
+
 
 ## Como Publicar esta Subpasta no Cloudflare Pages + D1 + Discord OAuth2
 
