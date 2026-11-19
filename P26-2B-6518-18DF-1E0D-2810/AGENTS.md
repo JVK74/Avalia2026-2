@@ -13,10 +13,10 @@
 ## 2. Agentes Criados e Responsabilidades (Mínimo de 3 Agentes)
 
 ### Agente 1: Arquiteto Serverless, Cloudflare D1 e Segurança Discord OAuth2
-- **Papel:** Modelagem do esquema relacional SQLite no Cloudflare D1 (`migrations/0001_init.sql`), implementação do fluxo de autenticação Discord OAuth2 e validação das regras de negócio no servidor (`functions/`).
+- **Papel:** Modelagem incremental do esquema relacional SQLite no Cloudflare D1 (`migrations/0001_init.sql` e `migrations/0002_pomodoro_backend.sql`), implementação do fluxo de autenticação Discord OAuth2 e validação das regras de negócio no servidor (`functions/`).
 - **Skill Utilizada:** [`skills/serverless-d1-discord/SKILL.md`](./skills/serverless-d1-discord/SKILL.md)
 - **Entregas Realizadas:**
-  - Estruturação das tabelas e índices no Cloudflare D1.
+  - Estruturação incremental das tabelas e índices no Cloudflare D1, preservando a migração inicial.
   - Proteção das rotas serverless contra manipulação no cliente.
 
 ### Agente 2: Especialista em Interface Web Vanilla (HTML5, CSS3 e DOM)

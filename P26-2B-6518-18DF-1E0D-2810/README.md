@@ -22,35 +22,64 @@ A interface deve consultar o histórico no servidor para exibir o total de horas
 ---
 
 
-## Como Publicar esta Subpasta no Cloudflare Pages + D1 + Discord OAuth2
+## Contratos da API
 
-1. No painel da Cloudflare (**Workers & Pages** → **Create** → **Pages** → **Connect to Git**), selecione o seu fork do repositório `Avalia2026-2`.
-2. Configure os parâmetros de build apontando para esta subpasta:
-   - **Root directory (Diretório raiz):** `P26-2B-6518-18DF-1E0D-2810`
-   - **Build command:** *(deixe em branco — HTML/CSS/JS puro)*
-   - **Build output directory:** `public`
-3. Crie o banco de dados D1 e aplique a migração inicial (no terminal do laboratório usando Scoop):
-   ```powershell
+Todas as rotas privadas exigem o cookie de sessão emitido pelo OAuth Discord. Requisições `POST`, `PATCH` e `DELETE` também exigem `Origin` igual à origem da aplicação. Erros usam `{ "ok": false, "error": "codigo", "message": "descrição" }`. Datas são ISO 8601 UTC.
+
+| Método e rota | Entrada | Resposta de sucesso |
+|---|---|---|
+| `GET /api/auth/discord` | Nenhuma | Redireciona ao Discord OAuth2; erro de configuração: `503` JSON. |
+| `GET /api/auth/discord/callback` | `code` e `state` OAuth2 | Redireciona para `/?login=success` e grava cookies HttpOnly. Falhas redirecionam com `?auth_error=...`. |
+| `GET /api/auth/me` | Cookie de sessão | `200 { "ok": true, "user": { "user_id", "username", "global_name", "avatar" } }`; sem sessão: `401`. |
+| `POST /api/auth/logout` | Cookie de sessão e `Origin` | `200 { "ok": true }`; revoga a sessão e expira o cookie. |
+| `GET /api/subjects` | Nenhuma | `200 { "ok": true, "subjects": [{ "id", "name", "created_at", "updated_at", "archived_at" }] }`; lista apenas disciplinas ativas do usuário. |
+| `POST /api/subjects` | `{ "name": "Física" }` | `201 { "ok": true, "subject": { ... } }`. Nome: 1 a 80 caracteres. |
+| `PATCH /api/subjects/:id` | `{ "name": "Física II" }` | `200 { "ok": true, "subject": { ... } }`. |
+| `DELETE /api/subjects/:id` | Nenhuma | `200 { "ok": true, "subject": { ..., "archived_at": "..." } }`; arquiva, não apaga. |
+| `POST /api/pomodoro/cycles` | `{ "subject_id": 1, "duration_seconds": 1500 }` e `Idempotency-Key` (1 a 128 caracteres) | `201 { "ok": true, "cycle": { "id", "subject_id", "duration_seconds", "status", "started_at", "completed_at", "cancelled_at" }, "replayed": false }`; replay idempotente: `200`, `replayed: true`. |
+| `GET /api/pomodoro/active` | Nenhuma | `200 { "ok": true, "cycle": null }` ou objeto `{ "id", "subject_id", "subject_name", "duration_seconds", "status", "started_at" }`. |
+| `POST /api/pomodoro/cycles/:id/complete` | Nenhuma | `200 { "ok": true, "cycle": { "id", "subject_id", "duration_seconds", "status", "started_at", "completed_at" } }`; conclusão antecipada ou repetida: `409`. |
+| `POST /api/pomodoro/cycles/:id/cancel` | Nenhuma | `200 { "ok": true, "cycle": { "id", "subject_id", "duration_seconds", "status", "started_at", "cancelled_at" } }`; só ciclos em execução podem ser cancelados. |
+| `GET /api/metrics/weekly` | Nenhuma | `200 { "ok": true, "week": { "starts_on", "ends_on", "time_zone" }, "total_seconds", "total_hours", "completed_cycles", "subjects": [{ "subject_id", "name", "total_seconds", "total_hours", "completed_cycles" }] }`. `ends_on` é exclusivo. |
+| `GET /api/status` | Nenhuma | `200 { "ok": true, "chave", "d1Connected", "discordOAuthConfigured", "serverTimestamp" }`; não autentica nem grava dados. |
+
+`duration_seconds` aceita inteiros de 60 a 7200. As métricas contam a duração configurada de ciclos concluídos dentro da semana de segunda-feira a segunda-feira no fuso `America/Sao_Paulo`; cancelamentos são excluídos. Respostas `404` indicam recurso inexistente ou pertencente a outro usuário; conflitos de estado/idempotência usam `409`.
+
+## Testes locais
+
+Requer Node.js 22.13 ou superior (SQLite integrado ao Node):
+
+```sh
+cd P26-2B-6518-18DF-1E0D-2810
+npm test
+```
+
+Os testes exercitam as Functions com SQLite local e respostas Discord controladas. Eles verificam regras e consultas locais, mas não comprovam execução, bindings, cookies ou OAuth no ambiente Cloudflare remoto.
+
+## Publicação no Cloudflare Pages + D1 + Discord OAuth2
+
+1. No painel Cloudflare (**Workers & Pages** → **Create** → **Pages** → **Connect to Git**), selecione o fork e configure **Root directory** como `P26-2B-6518-18DF-1E0D-2810`, **Build command** em branco e **Build output directory** como `public`.
+2. Crie o banco D1 na subpasta oficial:
+
+   ```sh
    cd P26-2B-6518-18DF-1E0D-2810
-   npx.cmd wrangler d1 create db-p26-2b-6518-18df-1e0d-2810
-   # Copie o database_id gerado para o arquivo wrangler.jsonc e execute:
-   npx.cmd wrangler d1 migrations apply DB --remote
+   npx wrangler d1 create db-p26-2b-6518-18df-1e0d-2810
    ```
-4. **Vincule o Banco D1 ao seu Cloudflare Pages (Obrigatório para ativar env.DB):**
-   - No painel da Cloudflare: acesse seu projeto Pages → **Settings** → **Functions** → **D1 database bindings**.
-   - Clique em **Add binding**:
-     - **Variable name:** `DB`
-     - **D1 database:** selecione o banco que você criou (`db-p26-2b-6518-18df-1e0d-2810`).
-5. **Configuração do Discord OAuth2 (Obrigatório para autenticação real):**
-   - Acesse o **Discord Developer Portal** (https://discord.com/developers/applications) e crie uma nova Application.
-   - Na aba **OAuth2**:
-     - Copie o **Client ID** e gere o **Client Secret**.
-     - Em **Redirects**, adicione a URL exata do deploy:
-       `https://p26-2b-6518-18df-1e0d-2810.pages.dev/api/auth/discord/callback`
-   - No painel do seu projeto no Cloudflare Pages:
-     - Acesse **Settings** → **Environment variables**.
-     - Adicione as variáveis de ambiente:
-       - `DISCORD_CLIENT_ID`
-       - `DISCORD_CLIENT_SECRET`
-6. Atualize o campo **URL_CLOUDFLARE** no topo deste `README.md` com o endereço público gerado pela Cloudflare.
-7. Na raiz do repositório, execute `node validar-local.mjs P26-2B-6518-18DF-1E0D-2810` para validar todos os critérios antes de fazer o commit e abrir o Pull Request.
+
+3. Copie o `database_id` retornado pelo Wrangler para o campo `database_id` em `wrangler.jsonc`, substituindo o texto `SUBSTITUA_PELO_ID_GERADO_PELA_CLOUDFLARE`. O repositório não contém nem inventa um ID de banco.
+4. Aplique todas as migrações preservadas e incrementais:
+
+   ```sh
+   npx wrangler d1 migrations apply db-p26-2b-6518-18df-1e0d-2810 --remote
+   ```
+
+5. Vincule o D1 ao Pages em **Settings** → **Functions** → **D1 database bindings**, com variável `DB` apontando para o banco criado.
+6. Crie uma aplicação no Discord Developer Portal e cadastre como Redirect URL a URL exata `https://<seu-projeto>.pages.dev/api/auth/discord/callback`. Configure `DISCORD_CLIENT_ID` e `DISCORD_CLIENT_SECRET` como secrets no Pages, ou pelo Wrangler:
+
+   ```sh
+   npx wrangler pages secret put DISCORD_CLIENT_ID
+   npx wrangler pages secret put DISCORD_CLIENT_SECRET
+   ```
+
+7. Após o deploy real, atualize `URL_CLOUDFLARE` no início deste README. Os comandos locais não validam a configuração remota.
+8. Na raiz do repositório, execute `node validar-local.mjs P26-2B-6518-18DF-1E0D-2810` para a pré-validação estrutural.
