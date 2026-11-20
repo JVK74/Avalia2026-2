@@ -5,7 +5,7 @@
 - **Turma:** 2B
 - **RA:** 2026108220
 - **Chave Única:** `P26-2B-6518-18DF-1E0D-2810`
-- **URL_CLOUDFLARE:** PENDENTE — preencher após deploy real.
+- **URL_CLOUDFLARE:** https://focusflow-p26-2b-6518-18df-1e0d-2810.pages.dev/
 
 ---
 
