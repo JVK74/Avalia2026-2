@@ -7,7 +7,8 @@
     {
       "binding": "DB",
       "database_name": "db-p26-2b-6518-18df-1e0d-2810",
-      "database_id": "SUBSTITUA_PELO_ID_GERADO_PELA_CLOUDFLARE"
+      "database_id": "a54bfd7f-0997-4920-869f-55414c4e491d",
+      "migrations_dir": "migrations"
     }
   ]
 }
