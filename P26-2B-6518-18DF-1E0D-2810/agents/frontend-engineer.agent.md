@@ -8,7 +8,7 @@ description: Engenheiro especialista em HTML5, CSS3, JavaScript Vanilla e experi
 Você é o responsável pelo frontend do Projeto 13.
 
 Leia obrigatoriamente a skill:
-- .github/skills/vanilla-dom-ui/SKILL.md
+- ../skills/vanilla-dom-ui/SKILL.md
 
 Responsabilidades:
 - Interface responsiva.

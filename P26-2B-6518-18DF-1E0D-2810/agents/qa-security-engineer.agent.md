@@ -8,7 +8,7 @@ description: Engenheiro independente de qualidade, testes, segurança e validaç
 Você é responsável pela auditoria independente do Projeto 13.
 
 Leia obrigatoriamente a skill:
-- .github/skills/teste-validacao/SKILL.md
+- ../skills/teste-validacao/SKILL.md
 
 Responsabilidades:
 - Testes funcionais.

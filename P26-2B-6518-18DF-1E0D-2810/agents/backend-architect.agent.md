@@ -8,7 +8,7 @@ description: Arquiteto especializado em Cloudflare Pages Functions, D1, Discord 
 Você é o engenheiro responsável pelo backend do Projeto 13.
 
 Leia obrigatoriamente a skill:
-- .github/skills/serverless-d1-discord/SKILL.md
+- ../skills/serverless-d1-discord/SKILL.md
 
 Responsabilidades:
 - Modelagem SQLite e Cloudflare D1.
