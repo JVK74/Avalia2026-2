@@ -4,8 +4,8 @@
 
 ## 1. Ambiente de Orquestração (Harness Utilizado)
 
-- **Harness Principal:** *(Descreva aqui qual harness foi utilizado, ex: Antigravity / Claude Code / Cursor / Cline / GitHub Copilot Workspace / OpenHands)*
-- **Modelo(s) Base:** *(Informe os modelos utilizados pelos agentes)*
+- **Harness Principal:** GitHub Codespaces (VS Code Web) com GitHub Copilot Chat em modo Agent, utilizando agentes customizados definidos em `../.github/agents/`.
+- **Modelo(s) Base:** Modelos selecionados no GitHub Copilot Chat durante as sessões. Os nomes e versões específicos devem ser registrados conforme o histórico das sessões, sem atribuir modelos que não possam ser confirmados.
 - **Estratégia de Coordenação:** Os agentes operaram de forma modular sobre a subpasta `P26-2B-6518-18DF-1E0D-2810/`, compartilhando especificações de banco de dados D1, contratos JSON das Cloudflare Pages Functions e verificação automatizada via `validar-local.mjs`.
 
 ---

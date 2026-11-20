@@ -81,5 +81,5 @@ Os testes exercitam as Functions com SQLite local e respostas Discord controlada
    npx wrangler pages secret put DISCORD_CLIENT_SECRET
    ```
 
-7. Após o deploy real, atualize `URL_CLOUDFLARE` no início deste README. Os comandos locais não validam a configuração remota.
+7. A URL de produção está registrada no início deste README. Caso o domínio ou projeto seja alterado, atualize o campo URL_CLOUDFLARE.
 8. Na raiz do repositório, execute `node validar-local.mjs P26-2B-6518-18DF-1E0D-2810` para a pré-validação estrutural.
