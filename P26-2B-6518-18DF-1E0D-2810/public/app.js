@@ -1,4 +1,5 @@
 const SETTINGS_KEY = "focusflow.settings.v1";
+const POMODORO_SERIES_KEY_PREFIX = "focusflow.pomodoro.series.v1:";
 const DEFAULT_SETTINGS = Object.freeze({
   focusMinutes: 25,
   shortBreakMinutes: 5,
@@ -140,6 +141,7 @@ const state = {
   breakDeadline: null,
   breakDurationSeconds: 0,
   completedInSeries: 0,
+  pomodoroSeriesStorageUnavailable: false,
   editingSubjectId: null,
   isLoadingSubjects: true,
   isStarting: false,
@@ -241,6 +243,69 @@ function readSettings() {
   }
 }
 
+function pomodoroSeriesStorageKey(userId) {
+  return `${POMODORO_SERIES_KEY_PREFIX}${encodeURIComponent(userId)}`;
+}
+
+function validPomodoroSeries(series) {
+  if (!series || series.version !== 1
+    || !Number.isSafeInteger(series.completedInSeries)
+    || series.completedInSeries < 0) {
+    return false;
+  }
+  if (series.phase === "focus") {
+    return series.breakDeadline === null && series.breakDurationSeconds === 0;
+  }
+  return (series.phase === "break-short" || series.phase === "break-long")
+    && Number.isSafeInteger(series.breakDeadline)
+    && series.breakDeadline > 0
+    && Number.isInteger(series.breakDurationSeconds)
+    && series.breakDurationSeconds >= 60
+    && series.breakDurationSeconds <= 3600;
+}
+
+function restorePomodoroSeries(userId) {
+  state.pomodoroSeriesStorageUnavailable = false;
+  state.completedInSeries = 0;
+  state.phase = "focus";
+  state.breakDeadline = null;
+  state.breakDurationSeconds = 0;
+  if (typeof userId !== "string" || !userId) return;
+
+  try {
+    const raw = window.localStorage.getItem(pomodoroSeriesStorageKey(userId));
+    if (!raw) return;
+    const saved = JSON.parse(raw);
+    if (!validPomodoroSeries(saved)) return;
+
+    state.completedInSeries = saved.completedInSeries;
+    state.phase = saved.phase;
+    state.breakDeadline = saved.breakDeadline;
+    state.breakDurationSeconds = saved.breakDurationSeconds;
+  } catch {
+    state.pomodoroSeriesStorageUnavailable = true;
+  }
+}
+
+function persistPomodoroSeries() {
+  const userId = state.user?.user_id;
+  if (typeof userId !== "string" || !userId) return;
+
+  try {
+    window.localStorage.setItem(pomodoroSeriesStorageKey(userId), JSON.stringify({
+      version: 1,
+      completedInSeries: state.completedInSeries,
+      phase: state.phase,
+      breakDeadline: state.breakDeadline,
+      breakDurationSeconds: state.breakDurationSeconds,
+    }));
+    state.pomodoroSeriesStorageUnavailable = false;
+  } catch {
+    state.pomodoroSeriesStorageUnavailable = true;
+    setSettingsStatus("Não foi possível salvar a sequência do Pomodoro neste navegador.", true);
+  }
+}
+
 function renderSettings() {
   elements.focusMinutes.value = state.settings.focusMinutes;
   elements.shortBreakMinutes.value = state.settings.shortBreakMinutes;
@@ -256,6 +321,8 @@ function showLoginView() {
   state.activeCycleLoaded = false;
   state.phase = "focus";
   state.breakDeadline = null;
+  state.breakDurationSeconds = 0;
+  state.completedInSeries = 0;
   state.timerMessage = "";
   elements.loginView.hidden = false;
   elements.appView.hidden = true;
@@ -267,6 +334,9 @@ function showLoginView() {
 
 function showAppView(user) {
   state.user = user;
+  restorePomodoroSeries(user.user_id);
+  renderCycleProgress();
+  updateTimer();
   elements.loginView.hidden = true;
   elements.appView.hidden = false;
   elements.appNav.hidden = false;
@@ -429,6 +499,7 @@ function startBreak(isLong) {
     : state.settings.shortBreakMinutes * 60;
   state.breakDeadline = Date.now() + state.breakDurationSeconds * 1000;
   state.nextCompletionAttemptAt = 0;
+  persistPomodoroSeries();
   elements.timerMessage.textContent = isLong
     ? "Foco confirmado pelo servidor. Hora de um descanso longo."
     : "Foco confirmado pelo servidor. Hora de um descanso curto.";
@@ -436,21 +507,26 @@ function startBreak(isLong) {
   updateTimer();
 }
 
-function finishBreak() {
+function finishBreak(completed = true) {
   const wasLong = state.phase === "break-long";
   state.phase = "focus";
   state.breakDeadline = null;
   state.breakDurationSeconds = 0;
-  if (wasLong) state.completedInSeries = 0;
+  if (wasLong && completed) state.completedInSeries = 0;
+  persistPomodoroSeries();
   renderCycleProgress();
-  elements.timerMessage.textContent = "Descanso encerrado. Escolha quando começar o próximo foco.";
-  showNotice("Descanso concluído. Você pode iniciar um novo foco.", "info");
+  elements.timerMessage.textContent = completed
+    ? "Descanso encerrado. Escolha quando começar o próximo foco."
+    : "Descanso interrompido. Escolha quando começar o próximo foco.";
+  showNotice(completed
+    ? "Descanso concluído. Você pode iniciar um novo foco."
+    : "Descanso interrompido. Você pode iniciar um novo foco.", "info");
   updateTimer();
 }
 
 function skipBreak() {
   if (!state.phase.startsWith("break-")) return;
-  finishBreak();
+  finishBreak(state.breakDeadline !== null && state.breakDeadline <= Date.now());
 }
 
 function makeIdempotencyKey() {
@@ -529,6 +605,8 @@ async function synchronizeActiveCycle(expectedId = null) {
       state.activeCycle = cycle;
       state.phase = "focus";
       state.breakDeadline = null;
+      state.breakDurationSeconds = 0;
+      persistPomodoroSeries();
       state.timerMessage = expectedId && String(cycle.id) === String(expectedId)
         ? "O servidor ainda informa este foco ativo; nova confirmação será tentada em instantes."
         : "Ciclo ativo restaurado do servidor.";
@@ -543,6 +621,8 @@ async function synchronizeActiveCycle(expectedId = null) {
       if (expectedId) {
         state.phase = "focus";
         state.breakDeadline = null;
+        state.breakDurationSeconds = 0;
+        persistPomodoroSeries();
         state.timerMessage = "O servidor não informa um foco ativo. Métricas serão sincronizadas sem presumir conclusão.";
         void loadMetrics();
       } else if (!state.phase.startsWith("break-")) {
@@ -1061,6 +1141,9 @@ async function bootstrap() {
     if (state.settingsStorageUnavailable) {
       setSettingsStatus("Não foi possível ler preferências salvas; padrões aplicados nesta sessão.", true);
     }
+    if (state.pomodoroSeriesStorageUnavailable) {
+      showNotice("Não foi possível ler a sequência salva do Pomodoro; ela vale apenas nesta sessão.", "error");
+    }
   } catch (error) {
     showLoginView();
     if (oauthNotice?.kind === "error") {
@@ -1072,6 +1155,9 @@ async function bootstrap() {
     }
     if (state.settingsStorageUnavailable) {
       setSettingsStatus("Não foi possível ler preferências salvas; padrões aplicados nesta sessão.", true);
+    }
+    if (state.pomodoroSeriesStorageUnavailable) {
+      showNotice("Não foi possível ler a sequência salva do Pomodoro; ela vale apenas nesta sessão.", "error");
     }
   }
 }

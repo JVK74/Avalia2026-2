@@ -11,7 +11,7 @@
   --border-light: #393945;
   --text: #f3f2f8;
   --muted: #a4a2b1;
-  --subtle: #777583;
+  --subtle: #a6a4b2;
   --accent: #9288ff;
   --accent-bright: #aaa2ff;
   --accent-soft: #29263f;
@@ -730,7 +730,7 @@ main {
 }
 
 .field-control::placeholder {
-  color: #797784;
+  color: var(--subtle);
 }
 
 .field-control:disabled {
