@@ -314,3 +314,57 @@ test("rotas protegidas rejeitam falta de sessão e origem cruzada", async (t) =>
   });
   assert.equal((await startCycle(request)).status, 403);
 });
+
+test("unicidade real retorna 409 e falha operacional D1 retorna 500", async (t) => {
+  const { sqlite, env, addUser } = setup();
+  t.after(() => sqlite.close());
+  const token = addUser("user-a");
+
+  const first = await postJson(createSubject, env, "/api/subjects", token, { name: "Física" });
+  assert.equal(first.status, 201);
+  const duplicate = await postJson(createSubject, env, "/api/subjects", token, { name: "física" });
+  assert.equal(duplicate.status, 409);
+  assert.equal((await duplicate.json()).error, "subject_name_conflict");
+
+  const originalPrepare = env.DB.prepare.bind(env.DB);
+  env.DB.prepare = (sql) => {
+    if (/FROM subjects/.test(sql) && !/sessions/.test(sql)) {
+      return {
+        bind() {
+          return { all: async () => { throw new Error("D1 operational failure"); } };
+        },
+      };
+    }
+    return originalPrepare(sql);
+  };
+  const operational = await listSubjects(context(env, "/api/subjects", { token }));
+  assert.equal(operational.status, 500);
+  assert.equal((await operational.json()).error, "database_error");
+});
+
+test("respostas protegidas e erros autenticados usam Cache-Control no-store", async (t) => {
+  const { sqlite, env, addUser } = setup();
+  t.after(() => sqlite.close());
+  const token = addUser("user-a");
+
+  const responses = [
+    await authMe(context(env, "/api/auth/me", { token })),
+    await listSubjects(context(env, "/api/subjects", { token })),
+    await activeCycle(context(env, "/api/pomodoro/active", { token })),
+    await weeklyMetrics(context(env, "/api/metrics/weekly", { token })),
+  ];
+  for (const response of responses) {
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("Cache-Control"), "no-store");
+  }
+
+  const missing = await archiveSubject(context(env, "/api/subjects/999", {
+    method: "DELETE", token, params: { id: "999" },
+  }));
+  assert.equal(missing.status, 404);
+  assert.equal(missing.headers.get("Cache-Control"), "no-store");
+
+  const unauthorized = await listSubjects(context(env, "/api/subjects"));
+  assert.equal(unauthorized.status, 401);
+  assert.equal(unauthorized.headers.get("Cache-Control"), "no-store");
+});

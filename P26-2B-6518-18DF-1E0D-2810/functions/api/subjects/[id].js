@@ -1,6 +1,8 @@
 import {
   authenticate,
+  databaseFailure,
   failure,
+  isUniqueConstraintError,
   json,
   readJsonObject,
   requireDatabase,
@@ -35,8 +37,11 @@ export async function onRequestPatch(context) {
       `SELECT ${SUBJECT_SELECT} FROM subjects WHERE id = ? AND user_id = ?`
     ).bind(id, auth.user.user_id).first();
     return json({ ok: true, subject });
-  } catch {
-    return failure("subject_name_conflict", 409, "Já existe uma disciplina ativa com esse nome.");
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      return failure("subject_name_conflict", 409, "Já existe uma disciplina ativa com esse nome.");
+    }
+    return databaseFailure();
   }
 }
 
@@ -49,15 +54,19 @@ export async function onRequestDelete(context) {
 
   const id = validId(context.params.id);
   if (!id) return failure("invalid_subject_id", 400, "ID de disciplina inválido.");
-  const now = new Date().toISOString();
-  const result = await context.env.DB.prepare(
-    `UPDATE subjects SET archived_at = ?, updated_at = ?
-     WHERE id = ? AND user_id = ? AND archived_at IS NULL`
-  ).bind(now, now, id, auth.user.user_id).run();
-  if (!result.meta.changes) return failure("subject_not_found", 404, "Disciplina não encontrada.");
+  try {
+    const now = new Date().toISOString();
+    const result = await context.env.DB.prepare(
+      `UPDATE subjects SET archived_at = ?, updated_at = ?
+       WHERE id = ? AND user_id = ? AND archived_at IS NULL`
+    ).bind(now, now, id, auth.user.user_id).run();
+    if (!result.meta.changes) return failure("subject_not_found", 404, "Disciplina não encontrada.");
 
-  const subject = await context.env.DB.prepare(
-    `SELECT ${SUBJECT_SELECT} FROM subjects WHERE id = ? AND user_id = ?`
-  ).bind(id, auth.user.user_id).first();
-  return json({ ok: true, subject });
+    const subject = await context.env.DB.prepare(
+      `SELECT ${SUBJECT_SELECT} FROM subjects WHERE id = ? AND user_id = ?`
+    ).bind(id, auth.user.user_id).first();
+    return json({ ok: true, subject });
+  } catch {
+    return databaseFailure();
+  }
 }

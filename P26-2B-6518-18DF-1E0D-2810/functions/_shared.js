@@ -1,5 +1,7 @@
 export function json(data, status = 200, headers = {}) {
-  return Response.json(data, { status, headers });
+  const mergedHeaders = new Headers(headers);
+  mergedHeaders.set("Cache-Control", "no-store");
+  return Response.json(data, { status, headers: mergedHeaders });
 }
 
 export function failure(error, status, message = error) {
@@ -7,7 +9,23 @@ export function failure(error, status, message = error) {
 }
 
 export function requireDatabase(env) {
-  return env.DB ? null : failure("database_unavailable", 503, "Banco de dados indisponível.");
+  return env.DB ? null : databaseFailure();
+}
+
+export function isUniqueConstraintError(error) {
+  const details = [
+    error?.message,
+    error?.cause?.message,
+    error?.code,
+    error?.cause?.code,
+  ].filter(Boolean).join(" ").toUpperCase();
+  return details.includes("UNIQUE CONSTRAINT FAILED")
+    || details.includes("SQLITE_CONSTRAINT_UNIQUE")
+    || details.includes("CONSTRAINT_UNIQUE");
+}
+
+export function databaseFailure() {
+  return failure("database_error", 500, "Erro operacional ao acessar o banco de dados.");
 }
 
 export function readCookie(request, name) {
@@ -54,7 +72,12 @@ export async function getSessionUser(context) {
 }
 
 export async function authenticate(context) {
-  const user = await getSessionUser(context);
+  let user;
+  try {
+    user = await getSessionUser(context);
+  } catch {
+    return { user: null, response: databaseFailure() };
+  }
   return user
     ? { user, response: null }
     : { user: null, response: failure("unauthorized", 401, "Autenticação Discord necessária.") };

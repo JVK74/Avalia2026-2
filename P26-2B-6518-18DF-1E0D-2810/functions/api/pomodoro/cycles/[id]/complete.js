@@ -1,4 +1,4 @@
-import { authenticate, failure, json, requireDatabase, requireSameOrigin, validId } from "../../../../_shared.js";
+import { authenticate, databaseFailure, failure, json, requireDatabase, requireSameOrigin, validId } from "../../../../_shared.js";
 
 export async function onRequestPost(context) {
   if (!requireSameOrigin(context.request)) return failure("csrf_rejected", 403, "Origem da requisição inválida.");
@@ -9,9 +9,14 @@ export async function onRequestPost(context) {
 
   const id = validId(context.params.id);
   if (!id) return failure("invalid_cycle_id", 400, "ID de ciclo inválido.");
-  const cycle = await context.env.DB.prepare(
-    "SELECT id, duration_seconds, status, started_at FROM pomodoro_cycles WHERE id = ? AND user_id = ?"
-  ).bind(id, auth.user.user_id).first();
+  let cycle;
+  try {
+    cycle = await context.env.DB.prepare(
+      "SELECT id, duration_seconds, status, started_at FROM pomodoro_cycles WHERE id = ? AND user_id = ?"
+    ).bind(id, auth.user.user_id).first();
+  } catch {
+    return databaseFailure();
+  }
   if (!cycle) return failure("cycle_not_found", 404, "Ciclo não encontrado.");
   if (cycle.status !== "running") return failure("cycle_not_running", 409, "O ciclo não está em execução.");
 
@@ -20,15 +25,25 @@ export async function onRequestPost(context) {
     return failure("cycle_too_early", 409, "O tempo configurado ainda não terminou.");
   }
 
-  const result = await context.env.DB.prepare(
-    `UPDATE pomodoro_cycles SET status = 'completed', completed_at = ?
-     WHERE id = ? AND user_id = ? AND status = 'running'`
-  ).bind(now.toISOString(), id, auth.user.user_id).run();
+  let result;
+  let completed;
+  try {
+    result = await context.env.DB.prepare(
+      `UPDATE pomodoro_cycles SET status = 'completed', completed_at = ?
+       WHERE id = ? AND user_id = ? AND status = 'running'`
+    ).bind(now.toISOString(), id, auth.user.user_id).run();
+  } catch {
+    return databaseFailure();
+  }
   if (!result.meta.changes) return failure("cycle_not_running", 409, "O ciclo já foi finalizado.");
 
-  const completed = await context.env.DB.prepare(
-    `SELECT id, subject_id, duration_seconds, status, started_at, completed_at
-     FROM pomodoro_cycles WHERE id = ? AND user_id = ?`
-  ).bind(id, auth.user.user_id).first();
+  try {
+    completed = await context.env.DB.prepare(
+      `SELECT id, subject_id, duration_seconds, status, started_at, completed_at
+       FROM pomodoro_cycles WHERE id = ? AND user_id = ?`
+    ).bind(id, auth.user.user_id).first();
+  } catch {
+    return databaseFailure();
+  }
   return json({ ok: true, cycle: completed });
 }

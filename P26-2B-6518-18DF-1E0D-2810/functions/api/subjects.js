@@ -1,6 +1,8 @@
 import {
   authenticate,
+  databaseFailure,
   failure,
+  isUniqueConstraintError,
   json,
   readJsonObject,
   requireDatabase,
@@ -15,10 +17,14 @@ export async function onRequestGet(context) {
   const auth = await authenticate(context);
   if (auth.response) return auth.response;
 
-  const result = await context.env.DB.prepare(
-    `SELECT ${SUBJECT_SELECT} FROM subjects WHERE user_id = ? AND archived_at IS NULL ORDER BY name COLLATE NOCASE`
-  ).bind(auth.user.user_id).all();
-  return json({ ok: true, subjects: result.results || [] });
+  try {
+    const result = await context.env.DB.prepare(
+      `SELECT ${SUBJECT_SELECT} FROM subjects WHERE user_id = ? AND archived_at IS NULL ORDER BY name COLLATE NOCASE`
+    ).bind(auth.user.user_id).all();
+    return json({ ok: true, subjects: result.results || [] });
+  } catch {
+    return databaseFailure();
+  }
 }
 
 export async function onRequestPost(context) {
@@ -43,7 +49,10 @@ export async function onRequestPost(context) {
       `SELECT ${SUBJECT_SELECT} FROM subjects WHERE id = ? AND user_id = ?`
     ).bind(result.meta.last_row_id, auth.user.user_id).first();
     return json({ ok: true, subject }, 201);
-  } catch {
-    return failure("subject_name_conflict", 409, "Já existe uma disciplina ativa com esse nome.");
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      return failure("subject_name_conflict", 409, "Já existe uma disciplina ativa com esse nome.");
+    }
+    return databaseFailure();
   }
 }

@@ -1,6 +1,8 @@
 import {
   authenticate,
+  databaseFailure,
   failure,
+  isUniqueConstraintError,
   json,
   readJsonObject,
   requireDatabase,
@@ -32,9 +34,14 @@ export async function onRequestPost(context) {
     return failure("invalid_cycle", 400, "Informe subject_id e duração inteira entre 60 e 7200 segundos.");
   }
 
-  const existing = await context.env.DB.prepare(
-    `SELECT ${CYCLE_SELECT} FROM pomodoro_cycles WHERE user_id = ? AND idempotency_key = ?`
-  ).bind(auth.user.user_id, idempotencyKey).first();
+  let existing;
+  try {
+    existing = await context.env.DB.prepare(
+      `SELECT ${CYCLE_SELECT} FROM pomodoro_cycles WHERE user_id = ? AND idempotency_key = ?`
+    ).bind(auth.user.user_id, idempotencyKey).first();
+  } catch {
+    return databaseFailure();
+  }
   if (existing) {
     if (!sameRequest(existing, subjectId, durationSeconds)) {
       return failure("idempotency_key_conflict", 409, "A chave já foi usada com parâmetros diferentes.");
@@ -42,9 +49,14 @@ export async function onRequestPost(context) {
     return json({ ok: true, cycle: existing, replayed: true });
   }
 
-  const subject = await context.env.DB.prepare(
-    "SELECT id FROM subjects WHERE id = ? AND user_id = ? AND archived_at IS NULL"
-  ).bind(subjectId, auth.user.user_id).first();
+  let subject;
+  try {
+    subject = await context.env.DB.prepare(
+      "SELECT id FROM subjects WHERE id = ? AND user_id = ? AND archived_at IS NULL"
+    ).bind(subjectId, auth.user.user_id).first();
+  } catch {
+    return databaseFailure();
+  }
   if (!subject) return failure("subject_not_found", 404, "Disciplina não encontrada.");
 
   const startedAt = new Date().toISOString();
@@ -57,16 +69,27 @@ export async function onRequestPost(context) {
       `SELECT ${CYCLE_SELECT} FROM pomodoro_cycles WHERE id = ? AND user_id = ?`
     ).bind(result.meta.last_row_id, auth.user.user_id).first();
     return json({ ok: true, cycle, replayed: false }, 201);
-  } catch {
-    const replay = await context.env.DB.prepare(
-      `SELECT ${CYCLE_SELECT} FROM pomodoro_cycles WHERE user_id = ? AND idempotency_key = ?`
-    ).bind(auth.user.user_id, idempotencyKey).first();
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) {
+      return databaseFailure();
+    }
+    let replay;
+    try {
+      replay = await context.env.DB.prepare(
+        `SELECT ${CYCLE_SELECT} FROM pomodoro_cycles WHERE user_id = ? AND idempotency_key = ?`
+      ).bind(auth.user.user_id, idempotencyKey).first();
+    } catch {
+      return databaseFailure();
+    }
     if (replay) {
       if (!sameRequest(replay, subjectId, durationSeconds)) {
         return failure("idempotency_key_conflict", 409, "A chave já foi usada com parâmetros diferentes.");
       }
       return json({ ok: true, cycle: replay, replayed: true });
     }
-    return failure("cycle_already_running", 409, "Já existe um ciclo em execução para este usuário.");
+    if (isUniqueConstraintError(error)) {
+      return failure("cycle_already_running", 409, "Já existe um ciclo em execução para este usuário.");
+    }
+    return databaseFailure();
   }
 }

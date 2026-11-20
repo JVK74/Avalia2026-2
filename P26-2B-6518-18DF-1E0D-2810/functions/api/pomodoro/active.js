@@ -1,4 +1,4 @@
-import { authenticate, failure, json, requireDatabase } from "../../_shared.js";
+import { authenticate, databaseFailure, json, requireDatabase } from "../../_shared.js";
 
 export async function onRequestGet(context) {
   const unavailable = requireDatabase(context.env);
@@ -6,12 +6,16 @@ export async function onRequestGet(context) {
   const auth = await authenticate(context);
   if (auth.response) return auth.response;
 
-  const cycle = await context.env.DB.prepare(
-    `SELECT cycles.id, cycles.subject_id, subjects.name AS subject_name,
-            cycles.duration_seconds, cycles.status, cycles.started_at
-     FROM pomodoro_cycles AS cycles
-     JOIN subjects ON subjects.id = cycles.subject_id AND subjects.user_id = cycles.user_id
-     WHERE cycles.user_id = ? AND cycles.status = 'running'`
-  ).bind(auth.user.user_id).first();
-  return json({ ok: true, cycle: cycle || null });
+  try {
+    const cycle = await context.env.DB.prepare(
+      `SELECT cycles.id, cycles.subject_id, subjects.name AS subject_name,
+              cycles.duration_seconds, cycles.status, cycles.started_at
+       FROM pomodoro_cycles AS cycles
+       JOIN subjects ON subjects.id = cycles.subject_id AND subjects.user_id = cycles.user_id
+       WHERE cycles.user_id = ? AND cycles.status = 'running'`
+    ).bind(auth.user.user_id).first();
+    return json({ ok: true, cycle: cycle || null });
+  } catch {
+    return databaseFailure();
+  }
 }

@@ -15,5 +15,5 @@ export async function onRequestGet({ env }) {
     d1Connected,
     discordOAuthConfigured: Boolean(env.DISCORD_CLIENT_ID && env.DISCORD_CLIENT_SECRET),
     serverTimestamp: new Date().toISOString(),
-  });
+  }, { headers: { "Cache-Control": "no-store" } });
 }
