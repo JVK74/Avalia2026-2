@@ -9,7 +9,7 @@ export function failure(error, status, message = error) {
 }
 
 export function requireDatabase(env) {
-  return env.DB ? null : databaseFailure();
+  return env.DB ? null : failure("database_unavailable", 503, "Banco de dados indisponível.");
 }
 
 export function isUniqueConstraintError(error) {

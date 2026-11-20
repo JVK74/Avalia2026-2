@@ -1,4 +1,4 @@
-import { cookie, failure, readCookie, requireDatabase, randomToken, sha256 } from "../../../_shared.js";
+import { cookie, databaseFailure, failure, readCookie, requireDatabase, randomToken, sha256 } from "../../../_shared.js";
 
 const STATE_COOKIE_PATH = "/api/auth/discord/callback";
 
@@ -23,16 +23,22 @@ export async function onRequestGet({ request, env }) {
     return redirectWithCookie("/?auth_error=invalid_oauth_state", clearStateCookie);
   }
 
-  const stateHash = await sha256(state);
-  const consumed = await env.DB.prepare(
-    "DELETE FROM oauth_states WHERE state_hash = ? AND expires_at > ? RETURNING state_hash"
-  ).bind(stateHash, new Date().toISOString()).first();
+  let consumed;
+  try {
+    const stateHash = await sha256(state);
+    consumed = await env.DB.prepare(
+      "DELETE FROM oauth_states WHERE state_hash = ? AND expires_at > ? RETURNING state_hash"
+    ).bind(stateHash, new Date().toISOString()).first();
+  } catch {
+    return databaseFailure();
+  }
   if (!consumed) return redirectWithCookie("/?auth_error=invalid_oauth_state", clearStateCookie);
 
   const code = url.searchParams.get("code");
   if (!code) return redirectWithCookie("/?auth_error=missing_code", clearStateCookie);
 
   const redirectUri = new URL("/api/auth/discord/callback", url.origin).href;
+  let profile;
   try {
     const tokenResponse = await fetch("https://discord.com/api/oauth2/token", {
       method: "POST",
@@ -57,15 +63,19 @@ export async function onRequestGet({ request, env }) {
     });
     if (!profileResponse.ok) return redirectWithCookie("/?auth_error=profile_fetch_failed", clearStateCookie);
 
-    const profile = await profileResponse.json();
+    profile = await profileResponse.json();
     if (typeof profile.id !== "string" || typeof profile.username !== "string") {
       return redirectWithCookie("/?auth_error=invalid_profile", clearStateCookie);
     }
+  } catch {
+    return redirectWithCookie("/?auth_error=oauth_failed", clearStateCookie);
+  }
 
-    const avatar = typeof profile.avatar === "string"
-      ? `https://cdn.discordapp.com/avatars/${encodeURIComponent(profile.id)}/${encodeURIComponent(profile.avatar)}.${profile.avatar.startsWith("a_") ? "gif" : "png"}`
-      : "https://cdn.discordapp.com/embed/avatars/0.png";
-    const now = new Date();
+  const avatar = typeof profile.avatar === "string"
+    ? `https://cdn.discordapp.com/avatars/${encodeURIComponent(profile.id)}/${encodeURIComponent(profile.avatar)}.${profile.avatar.startsWith("a_") ? "gif" : "png"}`
+    : "https://cdn.discordapp.com/embed/avatars/0.png";
+  const now = new Date();
+  try {
     await env.DB.prepare(
       `INSERT INTO discord_users (user_id, username, global_name, avatar, updated_at)
        VALUES (?, ?, ?, ?, ?)
@@ -75,18 +85,23 @@ export async function onRequestGet({ request, env }) {
          avatar = excluded.avatar,
          updated_at = excluded.updated_at`
     ).bind(profile.id, profile.username, profile.global_name || null, avatar, now.toISOString()).run();
+  } catch {
+    return databaseFailure();
+  }
 
-    const sessionToken = await randomToken();
-    const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const sessionToken = await randomToken();
+  const tokenHash = await sha256(sessionToken);
+  const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  try {
     await env.DB.prepare(
       "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)"
-    ).bind(await sha256(sessionToken), profile.id, now.toISOString(), expiresAt.toISOString()).run();
-
-    const headers = new Headers({ Location: "/?login=success", "Cache-Control": "no-store" });
-    headers.append("Set-Cookie", clearStateCookie);
-    headers.append("Set-Cookie", cookie("discord_session", sessionToken, 7 * 24 * 60 * 60));
-    return new Response(null, { status: 302, headers });
+    ).bind(tokenHash, profile.id, now.toISOString(), expiresAt.toISOString()).run();
   } catch {
-    return redirectWithCookie("/?auth_error=oauth_failed", clearStateCookie);
+    return databaseFailure();
   }
+
+  const headers = new Headers({ Location: "/?login=success", "Cache-Control": "no-store" });
+  headers.append("Set-Cookie", clearStateCookie);
+  headers.append("Set-Cookie", cookie("discord_session", sessionToken, 7 * 24 * 60 * 60));
+  return new Response(null, { status: 302, headers });
 }

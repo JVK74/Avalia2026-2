@@ -15,7 +15,7 @@ import { onRequestGet as activeCycle } from "../functions/api/pomodoro/active.js
 import { onRequestPost as completeCycle } from "../functions/api/pomodoro/cycles/[id]/complete.js";
 import { onRequestPost as cancelCycle } from "../functions/api/pomodoro/cycles/[id]/cancel.js";
 import { onRequestGet as weeklyMetrics } from "../functions/api/metrics/weekly.js";
-import { sha256 } from "../functions/_shared.js";
+import { requireDatabase, sha256 } from "../functions/_shared.js";
 import { weeklyRange } from "../functions/_weekly.js";
 
 const projectRoot = new URL("..", import.meta.url).pathname;
@@ -111,6 +111,40 @@ async function createOwnedSubject(env, token, name = "Cálculo") {
   return (await response.json()).subject;
 }
 
+async function beginOAuthCallback(env) {
+  const start = await oauthStart(context(env, "/api/auth/discord"));
+  const authorizeUrl = new URL(start.headers.get("Location"));
+  const state = authorizeUrl.searchParams.get("state");
+  const stateCookie = start.headers.get("Set-Cookie").split(";")[0];
+  return context(env, `/api/auth/discord/callback?code=auth-code&state=${state}`, {
+    headers: { Cookie: stateCookie },
+  });
+}
+
+function failD1Run(env, matches) {
+  const originalPrepare = env.DB.prepare.bind(env.DB);
+  env.DB.prepare = (sql) => {
+    if (!matches(sql)) return originalPrepare(sql);
+    return {
+      bind() {
+        return {
+          async first() { throw new Error("simulated D1 operational failure"); },
+          async all() { throw new Error("simulated D1 operational failure"); },
+          async run() { throw new Error("simulated D1 operational failure"); },
+        };
+      },
+    };
+  };
+}
+
+function mockDiscordProfile(t) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => url.endsWith("/token")
+    ? new Response(JSON.stringify({ access_token: "oauth-access" }), { status: 200 })
+    : new Response(JSON.stringify({ id: "discord-123", username: "vytor", global_name: "João Vytor", avatar: "hash" }), { status: 200 });
+  t.after(() => { globalThis.fetch = originalFetch; });
+}
+
 test("Discord OAuth usa state de uso único, importa perfil e cria sessão validável", async (t) => {
   const { sqlite, env } = setup();
   t.after(() => sqlite.close());
@@ -153,6 +187,60 @@ test("Discord OAuth usa state de uso único, importa perfil e cria sessão valid
   assert.equal((await authMe(context(env, "/api/auth/me", { headers: { Cookie: `discord_session=${sessionToken}` } }))).status, 401);
 });
 
+test("falha ao persistir usuário OAuth retorna 500 sem criar sessão", async (t) => {
+  const { sqlite, env } = setup();
+  t.after(() => sqlite.close());
+  mockDiscordProfile(t);
+  const callbackContext = await beginOAuthCallback(env);
+  failD1Run(env, (sql) => sql.includes("INSERT INTO discord_users"));
+
+  const response = await oauthCallback(callbackContext);
+  assert.equal(response.status, 500);
+  assert.equal(response.headers.get("Cache-Control"), "no-store");
+  assert.equal(response.headers.get("Location"), null);
+  assert.doesNotMatch(response.headers.get("Set-Cookie") || "", /discord_session=/);
+  assert.equal(await env.DB.prepare("SELECT COUNT(*) AS total FROM discord_users").first("total"), 0);
+  assert.equal(await env.DB.prepare("SELECT COUNT(*) AS total FROM sessions").first("total"), 0);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "database_error",
+    message: "Erro operacional ao acessar o banco de dados.",
+  });
+});
+
+test("falha ao persistir sessão OAuth não emite cookie autenticado", async (t) => {
+  const { sqlite, env } = setup();
+  t.after(() => sqlite.close());
+  mockDiscordProfile(t);
+  const callbackContext = await beginOAuthCallback(env);
+  failD1Run(env, (sql) => sql.includes("INSERT INTO sessions"));
+
+  const response = await oauthCallback(callbackContext);
+  assert.equal(response.status, 500);
+  assert.equal(response.headers.get("Cache-Control"), "no-store");
+  assert.equal(response.headers.get("Location"), null);
+  assert.doesNotMatch(response.headers.get("Set-Cookie") || "", /discord_session=/);
+  assert.equal(await env.DB.prepare("SELECT COUNT(*) AS total FROM discord_users").first("total"), 1);
+  assert.equal(await env.DB.prepare("SELECT COUNT(*) AS total FROM sessions").first("total"), 0);
+  assert.equal((await response.json()).error, "database_error");
+});
+
+test("falha externa do Discord permanece distinta de falha interna D1", async (t) => {
+  const { sqlite, env } = setup();
+  t.after(() => sqlite.close());
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("provider unavailable", { status: 503 });
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const callbackContext = await beginOAuthCallback(env);
+
+  const response = await oauthCallback(callbackContext);
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.get("Cache-Control"), "no-store");
+  assert.match(response.headers.get("Location"), /auth_error=token_exchange_failed/);
+  assert.doesNotMatch(response.headers.get("Set-Cookie") || "", /discord_session=/);
+  assert.equal(await env.DB.prepare("SELECT COUNT(*) AS total FROM sessions").first("total"), 0);
+});
+
 test("disciplinas são isoladas por usuário e DELETE apenas arquiva", async (t) => {
   const { sqlite, env, addUser } = setup();
   t.after(() => sqlite.close());
@@ -181,6 +269,36 @@ test("disciplinas são isoladas por usuário e DELETE apenas arquiva", async (t)
   }));
   assert.ok((await archived.json()).subject.archived_at);
   assert.equal(sqlite.prepare("SELECT COUNT(*) AS total FROM subjects WHERE id = ?").get(subjectA.id).total, 1);
+});
+
+test("PATCH retorna 409 para nome duplicado e 500 para falha operacional D1", async (t) => {
+  const { sqlite, env, addUser } = setup();
+  t.after(() => sqlite.close());
+  const token = addUser("user-a");
+  const first = await createOwnedSubject(env, token, "Física");
+  const second = await createOwnedSubject(env, token, "Química");
+
+  const duplicate = await updateSubject(context(env, `/api/subjects/${second.id}`, {
+    method: "PATCH", token, body: { name: "Física" }, params: { id: String(second.id) },
+  }));
+  assert.equal(duplicate.status, 409);
+  assert.deepEqual(await duplicate.json(), {
+    ok: false,
+    error: "subject_name_conflict",
+    message: "Já existe uma disciplina ativa com esse nome.",
+  });
+
+  failD1Run(env, (sql) => sql.startsWith("UPDATE subjects SET name"));
+  const operational = await updateSubject(context(env, `/api/subjects/${first.id}`, {
+    method: "PATCH", token, body: { name: "Física II" }, params: { id: String(first.id) },
+  }));
+  assert.equal(operational.status, 500);
+  assert.equal(operational.headers.get("Cache-Control"), "no-store");
+  assert.deepEqual(await operational.json(), {
+    ok: false,
+    error: "database_error",
+    message: "Erro operacional ao acessar o banco de dados.",
+  });
 });
 
 test("início de ciclos exige idempotência e impede ciclos concorrentes por usuário", async (t) => {
@@ -326,20 +444,26 @@ test("unicidade real retorna 409 e falha operacional D1 retorna 500", async (t) 
   assert.equal(duplicate.status, 409);
   assert.equal((await duplicate.json()).error, "subject_name_conflict");
 
-  const originalPrepare = env.DB.prepare.bind(env.DB);
-  env.DB.prepare = (sql) => {
-    if (/FROM subjects/.test(sql) && !/sessions/.test(sql)) {
-      return {
-        bind() {
-          return { all: async () => { throw new Error("D1 operational failure"); } };
-        },
-      };
-    }
-    return originalPrepare(sql);
-  };
+  failD1Run(env, (sql) => sql.includes("FROM subjects"));
   const operational = await listSubjects(context(env, "/api/subjects", { token }));
   assert.equal(operational.status, 500);
-  assert.equal((await operational.json()).error, "database_error");
+  assert.equal(operational.headers.get("Cache-Control"), "no-store");
+  assert.deepEqual(await operational.json(), {
+    ok: false,
+    error: "database_error",
+    message: "Erro operacional ao acessar o banco de dados.",
+  });
+});
+
+test("D1 ausente retorna 503 database_unavailable sem cache", async () => {
+  const response = requireDatabase({});
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("Cache-Control"), "no-store");
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "database_unavailable",
+    message: "Banco de dados indisponível.",
+  });
 });
 
 test("respostas protegidas e erros autenticados usam Cache-Control no-store", async (t) => {
