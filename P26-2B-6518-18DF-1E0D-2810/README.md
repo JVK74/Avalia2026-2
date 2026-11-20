@@ -38,12 +38,12 @@ Todas as rotas privadas exigem o cookie de sessão emitido pelo OAuth Discord. R
 | `DELETE /api/subjects/:id` | Nenhuma | `200 { "ok": true, "subject": { ..., "archived_at": "..." } }`; arquiva, não apaga. |
 | `POST /api/pomodoro/cycles` | `{ "subject_id": 1, "duration_seconds": 1500 }` e `Idempotency-Key` (1 a 128 caracteres) | `201 { "ok": true, "cycle": { "id", "subject_id", "duration_seconds", "status", "started_at", "completed_at", "cancelled_at" }, "replayed": false }`; replay idempotente: `200`, `replayed: true`. |
 | `GET /api/pomodoro/active` | Nenhuma | `200 { "ok": true, "cycle": null }` ou objeto `{ "id", "subject_id", "subject_name", "duration_seconds", "status", "started_at" }`. |
-| `POST /api/pomodoro/cycles/:id/complete` | Nenhuma | `200 { "ok": true, "cycle": { "id", "subject_id", "duration_seconds", "status", "started_at", "completed_at" } }`; conclusão antecipada ou repetida: `409`. |
+| `POST /api/pomodoro/cycles/:id/complete` | Nenhuma | Primeira conclusão: `200 { "ok": true, "cycle": { "id", "subject_id", "duration_seconds", "status", "started_at", "completed_at" }, "replayed": false }`; repetição após conclusão: mesmo ciclo e `replayed: true`. Conclusão antecipada ou de ciclo cancelado: `409`. |
 | `POST /api/pomodoro/cycles/:id/cancel` | Nenhuma | `200 { "ok": true, "cycle": { "id", "subject_id", "duration_seconds", "status", "started_at", "cancelled_at" } }`; só ciclos em execução podem ser cancelados. |
 | `GET /api/metrics/weekly` | Nenhuma | `200 { "ok": true, "week": { "starts_on", "ends_on", "time_zone" }, "total_seconds", "total_hours", "completed_cycles", "subjects": [{ "subject_id", "name", "total_seconds", "total_hours", "completed_cycles" }] }`. `ends_on` é exclusivo. |
 | `GET /api/status` | Nenhuma | `200 { "ok": true, "chave", "d1Connected", "discordOAuthConfigured", "serverTimestamp" }`; não autentica nem grava dados. |
 
-`duration_seconds` aceita inteiros de 60 a 7200. As métricas contam a duração configurada de ciclos concluídos dentro da semana de segunda-feira a segunda-feira no fuso `America/Sao_Paulo`; cancelamentos são excluídos. Respostas `404` indicam recurso inexistente ou pertencente a outro usuário; conflitos de estado/idempotência usam `409`.
+`duration_seconds` aceita inteiros de 60 a 7200. As métricas contam a duração configurada de ciclos concluídos dentro da semana de segunda-feira a segunda-feira no fuso `America/Sao_Paulo`; cancelamentos são excluídos. Respostas `404` indicam recurso inexistente ou pertencente a outro usuário; conflitos de estado/idempotência usam `409`. A conclusão é idempotente: reenvios, inclusive após perda da resposta HTTP, retornam a conclusão já gravada com `replayed: true` sem alterar `completed_at` nem contabilizar o ciclo novamente.
 
 ## Testes locais
 

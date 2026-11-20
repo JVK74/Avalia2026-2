@@ -1,5 +1,7 @@
 import { authenticate, databaseFailure, failure, json, requireDatabase, requireSameOrigin, validId } from "../../../../_shared.js";
 
+const CYCLE_SELECT = "id, subject_id, duration_seconds, status, started_at, completed_at";
+
 export async function onRequestPost(context) {
   if (!requireSameOrigin(context.request)) return failure("csrf_rejected", 403, "Origem da requisição inválida.");
   const unavailable = requireDatabase(context.env);
@@ -12,13 +14,14 @@ export async function onRequestPost(context) {
   let cycle;
   try {
     cycle = await context.env.DB.prepare(
-      "SELECT id, duration_seconds, status, started_at FROM pomodoro_cycles WHERE id = ? AND user_id = ?"
+      `SELECT ${CYCLE_SELECT} FROM pomodoro_cycles WHERE id = ? AND user_id = ?`
     ).bind(id, auth.user.user_id).first();
   } catch {
     return databaseFailure();
   }
   if (!cycle) return failure("cycle_not_found", 404, "Ciclo não encontrado.");
-  if (cycle.status !== "running") return failure("cycle_not_running", 409, "O ciclo não está em execução.");
+  if (cycle.status === "completed") return json({ ok: true, cycle, replayed: true });
+  if (cycle.status === "cancelled") return failure("cycle_not_running", 409, "O ciclo não está em execução.");
 
   const now = new Date();
   if (Date.parse(cycle.started_at) + cycle.duration_seconds * 1000 > now.getTime()) {
@@ -35,15 +38,25 @@ export async function onRequestPost(context) {
   } catch {
     return databaseFailure();
   }
-  if (!result.meta.changes) return failure("cycle_not_running", 409, "O ciclo já foi finalizado.");
+  if (!result.meta.changes) {
+    try {
+      cycle = await context.env.DB.prepare(
+        `SELECT ${CYCLE_SELECT} FROM pomodoro_cycles WHERE id = ? AND user_id = ?`
+      ).bind(id, auth.user.user_id).first();
+    } catch {
+      return databaseFailure();
+    }
+    if (!cycle) return failure("cycle_not_found", 404, "Ciclo não encontrado.");
+    if (cycle.status === "completed") return json({ ok: true, cycle, replayed: true });
+    return failure("cycle_not_running", 409, "O ciclo não está em execução.");
+  }
 
   try {
     completed = await context.env.DB.prepare(
-      `SELECT id, subject_id, duration_seconds, status, started_at, completed_at
-       FROM pomodoro_cycles WHERE id = ? AND user_id = ?`
+      `SELECT ${CYCLE_SELECT} FROM pomodoro_cycles WHERE id = ? AND user_id = ?`
     ).bind(id, auth.user.user_id).first();
   } catch {
     return databaseFailure();
   }
-  return json({ ok: true, cycle: completed });
+  return json({ ok: true, cycle: completed, replayed: false });
 }

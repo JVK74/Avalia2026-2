@@ -343,7 +343,7 @@ test("idempotência retorna o mesmo ciclo e rejeita outra carga", async (t) => {
   assert.equal(conflict.status, 409);
 });
 
-test("ciclos não podem terminar cedo ou duas vezes e cancelamentos não contam", async (t) => {
+test("conclusão de ciclo é idempotente e cancelamentos não contam", async (t) => {
   const { sqlite, env, addUser, addSubject } = setup();
   t.after(() => sqlite.close());
   const token = addUser("user-a");
@@ -364,10 +364,19 @@ test("ciclos não podem terminar cedo ou duas vezes e cancelamentos não contam"
     method: "POST", token, params: { id: String(cycleId) },
   }));
   assert.equal(completed.status, 200);
+  const firstResult = await completed.json();
+  assert.equal(firstResult.replayed, false);
+  const completedAt = firstResult.cycle.completed_at;
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
   const duplicate = await completeCycle(context(env, `/api/pomodoro/cycles/${cycleId}/complete`, {
     method: "POST", token, params: { id: String(cycleId) },
   }));
-  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.status, 200);
+  const replayResult = await duplicate.json();
+  assert.equal(replayResult.replayed, true);
+  assert.equal(replayResult.cycle.completed_at, completedAt);
+  assert.equal(sqlite.prepare("SELECT completed_at FROM pomodoro_cycles WHERE id = ?").get(cycleId).completed_at, completedAt);
 
   const next = await postJson(startCycle, env, "/api/pomodoro/cycles", token, {
     subject_id: subjectId, duration_seconds: 60,
@@ -377,10 +386,155 @@ test("ciclos não podem terminar cedo ou duas vezes e cancelamentos não contam"
     method: "POST", token, params: { id: String(nextId) },
   }));
   assert.equal((await cancelled.json()).cycle.status, "cancelled");
+  const completeCancelled = await completeCycle(context(env, `/api/pomodoro/cycles/${nextId}/complete`, {
+    method: "POST", token, params: { id: String(nextId) },
+  }));
+  assert.equal(completeCancelled.status, 409);
+
   const metrics = await weeklyMetrics(context(env, "/api/metrics/weekly", { token }));
   const data = await metrics.json();
   assert.equal(data.total_seconds, 60);
   assert.equal(data.completed_cycles, 1);
+});
+
+test("ciclo inexistente retorna 404 sem alterar registros ou métricas", async (t) => {
+  const { sqlite, env, addUser, addSubject } = setup();
+  t.after(() => sqlite.close());
+  const token = addUser("user-a");
+  const subjectId = addSubject("user-a");
+  const start = await postJson(startCycle, env, "/api/pomodoro/cycles", token, {
+    subject_id: subjectId, duration_seconds: 60,
+  }, { headers: { "Idempotency-Key": "missing-completion-baseline" } });
+  assert.equal(start.status, 201);
+  const existingCycleId = (await start.json()).cycle.id;
+  const now = Date.now();
+  sqlite.prepare(
+    "UPDATE pomodoro_cycles SET status = 'completed', started_at = ?, completed_at = ? WHERE id = ?"
+  ).run(new Date(now - 70_000).toISOString(), new Date(now - 10_000).toISOString(), existingCycleId);
+
+  const readCycles = () => sqlite.prepare(
+    "SELECT id, subject_id, duration_seconds, status, started_at, completed_at, cancelled_at FROM pomodoro_cycles ORDER BY id"
+  ).all().map((row) => ({ ...row }));
+  const beforeCycles = readCycles();
+  const beforeMetricsResponse = await weeklyMetrics(context(env, "/api/metrics/weekly", { token }));
+  assert.equal(beforeMetricsResponse.status, 200);
+  const beforeMetrics = await beforeMetricsResponse.json();
+  assert.equal(beforeMetrics.completed_cycles, 1);
+
+  const missingCycleId = 987654321;
+  const response = await completeCycle(context(env, `/api/pomodoro/cycles/${missingCycleId}/complete`, {
+    method: "POST", token, params: { id: String(missingCycleId) },
+  }));
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).error, "cycle_not_found");
+
+  const afterMetricsResponse = await weeklyMetrics(context(env, "/api/metrics/weekly", { token }));
+  assert.equal(afterMetricsResponse.status, 200);
+  assert.deepEqual(await afterMetricsResponse.json(), beforeMetrics);
+  assert.deepEqual(readCycles(), beforeCycles);
+  assert.equal(
+    sqlite.prepare("SELECT COUNT(*) AS total FROM pomodoro_cycles WHERE id = ?").get(missingCycleId).total,
+    0,
+  );
+});
+
+test("conclusões simultâneas recuperam a mesma gravação sem contabilizar duas vezes", async (t) => {
+  const { sqlite, env, addUser, addSubject } = setup();
+  t.after(() => sqlite.close());
+  const token = addUser("user-a");
+  const subjectId = addSubject("user-a");
+  const start = await postJson(startCycle, env, "/api/pomodoro/cycles", token, {
+    subject_id: subjectId, duration_seconds: 60,
+  }, { headers: { "Idempotency-Key": "concurrent-completion" } });
+  const cycleId = (await start.json()).cycle.id;
+  sqlite.prepare("UPDATE pomodoro_cycles SET started_at = ? WHERE id = ?")
+    .run(new Date(Date.now() - 61_000).toISOString(), cycleId);
+
+  const originalPrepare = env.DB.prepare.bind(env.DB);
+  const cycleSelect = "SELECT id, subject_id, duration_seconds, status, started_at, completed_at FROM pomodoro_cycles WHERE id = ? AND user_id = ?";
+  let initialReads = 0;
+  let releaseReads;
+  const bothReadsComplete = new Promise((resolve) => { releaseReads = resolve; });
+  env.DB.prepare = (sql) => {
+    const statement = originalPrepare(sql);
+    if (sql !== cycleSelect) return statement;
+    return {
+      bind(...values) {
+        const bound = statement.bind(...values);
+        return {
+          async first(...args) {
+            if (initialReads < 2) {
+              initialReads += 1;
+              if (initialReads === 2) releaseReads();
+              await bothReadsComplete;
+            }
+            return bound.first(...args);
+          },
+        };
+      },
+    };
+  };
+
+  const requests = [1, 2].map(() => completeCycle(context(env, `/api/pomodoro/cycles/${cycleId}/complete`, {
+    method: "POST", token, params: { id: String(cycleId) },
+  })));
+  const responses = await Promise.all(requests);
+  const results = await Promise.all(responses.map((response) => response.json()));
+  assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+  assert.deepEqual(results.map((result) => result.replayed).sort(), [false, true]);
+  assert.equal(results[0].cycle.completed_at, results[1].cycle.completed_at);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS total FROM pomodoro_cycles WHERE id = ? AND status = 'completed'").get(cycleId).total, 1);
+
+  const metrics = await weeklyMetrics(context(env, "/api/metrics/weekly", { token }));
+  const data = await metrics.json();
+  assert.equal(data.completed_cycles, 1);
+  assert.equal(data.total_seconds, 60);
+});
+
+test("um usuário diferente não consegue concluir nem ler o ciclo", async (t) => {
+  const { sqlite, env, addUser, addSubject } = setup();
+  t.after(() => sqlite.close());
+  const ownerToken = addUser("user-a");
+  const otherToken = addUser("user-b");
+  const subjectId = addSubject("user-a");
+  const start = await postJson(startCycle, env, "/api/pomodoro/cycles", ownerToken, {
+    subject_id: subjectId, duration_seconds: 60,
+  }, { headers: { "Idempotency-Key": "ownership-completion" } });
+  const cycleId = (await start.json()).cycle.id;
+  sqlite.prepare("UPDATE pomodoro_cycles SET started_at = ? WHERE id = ?")
+    .run(new Date(Date.now() - 61_000).toISOString(), cycleId);
+
+  const response = await completeCycle(context(env, `/api/pomodoro/cycles/${cycleId}/complete`, {
+    method: "POST", token: otherToken, params: { id: String(cycleId) },
+  }));
+  assert.equal(response.status, 404);
+  assert.equal(sqlite.prepare("SELECT status FROM pomodoro_cycles WHERE id = ?").get(cycleId).status, "running");
+});
+
+test("requisição repetida recupera a conclusão após perda da primeira resposta", async (t) => {
+  const { sqlite, env, addUser, addSubject } = setup();
+  t.after(() => sqlite.close());
+  const token = addUser("user-a");
+  const subjectId = addSubject("user-a");
+  const start = await postJson(startCycle, env, "/api/pomodoro/cycles", token, {
+    subject_id: subjectId, duration_seconds: 60,
+  }, { headers: { "Idempotency-Key": "lost-completion-response" } });
+  const cycleId = (await start.json()).cycle.id;
+  sqlite.prepare("UPDATE pomodoro_cycles SET started_at = ? WHERE id = ?")
+    .run(new Date(Date.now() - 61_000).toISOString(), cycleId);
+
+  await completeCycle(context(env, `/api/pomodoro/cycles/${cycleId}/complete`, {
+    method: "POST", token, params: { id: String(cycleId) },
+  }));
+  const retry = await completeCycle(context(env, `/api/pomodoro/cycles/${cycleId}/complete`, {
+    method: "POST", token, params: { id: String(cycleId) },
+  }));
+  const data = await retry.json();
+  assert.equal(retry.status, 200);
+  assert.equal(data.replayed, true);
+  assert.equal(data.cycle.status, "completed");
+  assert.ok(data.cycle.completed_at);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS total FROM pomodoro_cycles WHERE id = ?").get(cycleId).total, 1);
 });
 
 test("métricas respeitam a semana de São Paulo e a virada de segunda-feira", async (t) => {

@@ -1,5 +1,10 @@
+import {
+  completePomodoroCycle,
+  createPomodoroSeriesStore,
+  pomodoroSeriesStorageKey,
+} from "./pomodoro-series.js";
+
 const SETTINGS_KEY = "focusflow.settings.v1";
-const POMODORO_SERIES_KEY_PREFIX = "focusflow.pomodoro.series.v1:";
 const DEFAULT_SETTINGS = Object.freeze({
   focusMinutes: 25,
   shortBreakMinutes: 5,
@@ -98,14 +103,17 @@ function validRunningCycle(cycle) {
   return cycle
     && Number.isSafeInteger(cycle.id)
     && cycle.id > 0
+    && cycle.id < Number.MAX_SAFE_INTEGER
     && Number.isSafeInteger(cycle.subject_id)
     && cycle.subject_id > 0
-    && Number.isInteger(cycle.duration_seconds)
+    && Number.isSafeInteger(cycle.duration_seconds)
     && cycle.duration_seconds >= 60
     && cycle.duration_seconds <= 7200
     && cycle.status === "running"
     && typeof cycle.started_at === "string"
-    && Number.isFinite(Date.parse(cycle.started_at));
+    && Number.isSafeInteger(Date.parse(cycle.started_at))
+    && Date.parse(cycle.started_at) > 0
+    && Date.parse(cycle.started_at) < Number.MAX_SAFE_INTEGER;
 }
 
 function validWeeklyMetrics(metrics) {
@@ -142,6 +150,7 @@ const state = {
   breakDurationSeconds: 0,
   completedInSeries: 0,
   pomodoroSeriesStorageUnavailable: false,
+  pomodoroSeriesRecoveryRequired: false,
   editingSubjectId: null,
   isLoadingSubjects: true,
   isStarting: false,
@@ -150,8 +159,62 @@ const state = {
   nextCompletionAttemptAt: 0,
   settings: { ...DEFAULT_SETTINGS },
   settingsStorageUnavailable: false,
+  isFinishingBreak: false,
+  pendingCompletionRetryTimer: null,
+  pendingCompletionId: null,
+  processedCycleIds: [],
+  crossTabSynchronizationUnavailable: false,
   noticeTimer: null,
 };
+
+const pomodoroSeriesStore = createPomodoroSeriesStore({
+  storage: {
+    getItem(key) {
+      return window.localStorage.getItem(key);
+    },
+    setItem(key, value) {
+      window.localStorage.setItem(key, value);
+    },
+  },
+  locks: () => window.navigator?.locks,
+  onChange: applyPomodoroSeries,
+  onStorageUnavailable() {
+    state.pomodoroSeriesStorageUnavailable = true;
+    setSettingsStatus("Armazenamento local indisponível; não é possível confirmar novas conclusões.", true);
+    showNotice("Não foi possível persistir a sequência Pomodoro. A conclusão continuará pendente até o armazenamento ser recuperado.", "error");
+  },
+  onRecoveryRequired(userId) {
+    if (state.user?.user_id !== userId) return;
+    state.pomodoroSeriesRecoveryRequired = true;
+    setSettingsStatus("O progresso Pomodoro não pôde ser validado; novas conclusões estão bloqueadas.", true);
+    showNotice("Não foi possível recuperar o progresso salvo. Nenhum ciclo será contabilizado até a recuperação do estado.", "error");
+    renderCycleProgress();
+    renderTimerControls();
+  },
+  onSyncUnavailable() {
+    state.crossTabSynchronizationUnavailable = true;
+    setSettingsStatus("Web Locks indisponível neste navegador.", true);
+    showNotice("Web Locks indisponível: a sequência pode divergir entre abas.", "error");
+  },
+});
+
+function applyPomodoroSeries(userId, series) {
+  if (state.user?.user_id !== userId) return;
+  state.pomodoroSeriesRecoveryRequired = false;
+  state.completedInSeries = series.completedInSeries;
+  state.phase = series.phase;
+  state.breakDeadline = series.breakDeadline;
+  state.breakDurationSeconds = series.breakDurationSeconds;
+  state.pendingCompletionId = series.pendingCompletionId;
+  state.processedCycleIds = [...series.processedCycleIds];
+  if (state.activeCycle && state.processedCycleIds.includes(String(state.activeCycle.id))) {
+    state.activeCycle = null;
+    state.activeCycleLoaded = true;
+    state.nextCompletionAttemptAt = 0;
+  }
+  renderCycleProgress();
+  updateTimer();
+}
 
 function showNotice(message, kind = "info") {
   window.clearTimeout(state.noticeTimer);
@@ -231,8 +294,8 @@ function readSettings() {
     const saved = JSON.parse(raw);
     const settings = { ...DEFAULT_SETTINGS };
     for (const [key, [min, max]] of Object.entries(SETTINGS_LIMITS)) {
-      const value = Number(saved?.[key]);
-      if (Number.isInteger(value) && value >= min && value <= max) {
+      const value = saved?.[key];
+      if (typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max) {
         settings[key] = value;
       }
     }
@@ -240,69 +303,6 @@ function readSettings() {
   } catch {
     state.settingsStorageUnavailable = true;
     return { ...DEFAULT_SETTINGS };
-  }
-}
-
-function pomodoroSeriesStorageKey(userId) {
-  return `${POMODORO_SERIES_KEY_PREFIX}${encodeURIComponent(userId)}`;
-}
-
-function validPomodoroSeries(series) {
-  if (!series || series.version !== 1
-    || !Number.isSafeInteger(series.completedInSeries)
-    || series.completedInSeries < 0) {
-    return false;
-  }
-  if (series.phase === "focus") {
-    return series.breakDeadline === null && series.breakDurationSeconds === 0;
-  }
-  return (series.phase === "break-short" || series.phase === "break-long")
-    && Number.isSafeInteger(series.breakDeadline)
-    && series.breakDeadline > 0
-    && Number.isInteger(series.breakDurationSeconds)
-    && series.breakDurationSeconds >= 60
-    && series.breakDurationSeconds <= 3600;
-}
-
-function restorePomodoroSeries(userId) {
-  state.pomodoroSeriesStorageUnavailable = false;
-  state.completedInSeries = 0;
-  state.phase = "focus";
-  state.breakDeadline = null;
-  state.breakDurationSeconds = 0;
-  if (typeof userId !== "string" || !userId) return;
-
-  try {
-    const raw = window.localStorage.getItem(pomodoroSeriesStorageKey(userId));
-    if (!raw) return;
-    const saved = JSON.parse(raw);
-    if (!validPomodoroSeries(saved)) return;
-
-    state.completedInSeries = saved.completedInSeries;
-    state.phase = saved.phase;
-    state.breakDeadline = saved.breakDeadline;
-    state.breakDurationSeconds = saved.breakDurationSeconds;
-  } catch {
-    state.pomodoroSeriesStorageUnavailable = true;
-  }
-}
-
-function persistPomodoroSeries() {
-  const userId = state.user?.user_id;
-  if (typeof userId !== "string" || !userId) return;
-
-  try {
-    window.localStorage.setItem(pomodoroSeriesStorageKey(userId), JSON.stringify({
-      version: 1,
-      completedInSeries: state.completedInSeries,
-      phase: state.phase,
-      breakDeadline: state.breakDeadline,
-      breakDurationSeconds: state.breakDurationSeconds,
-    }));
-    state.pomodoroSeriesStorageUnavailable = false;
-  } catch {
-    state.pomodoroSeriesStorageUnavailable = true;
-    setSettingsStatus("Não foi possível salvar a sequência do Pomodoro neste navegador.", true);
   }
 }
 
@@ -317,12 +317,16 @@ function renderSettings() {
 
 function showLoginView() {
   state.user = null;
+  state.pomodoroSeriesStorageUnavailable = false;
+  state.pomodoroSeriesRecoveryRequired = false;
   state.activeCycle = null;
   state.activeCycleLoaded = false;
   state.phase = "focus";
   state.breakDeadline = null;
   state.breakDurationSeconds = 0;
   state.completedInSeries = 0;
+  state.pendingCompletionId = null;
+  state.processedCycleIds = [];
   state.timerMessage = "";
   elements.loginView.hidden = false;
   elements.appView.hidden = true;
@@ -334,7 +338,6 @@ function showLoginView() {
 
 function showAppView(user) {
   state.user = user;
-  restorePomodoroSeries(user.user_id);
   renderCycleProgress();
   updateTimer();
   elements.loginView.hidden = true;
@@ -438,7 +441,9 @@ function renderTimerControls() {
   elements.startFocusButton.hidden = hasActiveCycle || inBreak;
   elements.cancelFocusButton.hidden = !hasActiveCycle;
   elements.skipBreakButton.hidden = !inBreak;
-  elements.startFocusButton.disabled = state.isStarting || state.isLoadingSubjects || !state.activeCycleLoaded || !state.subjects.length;
+  elements.startFocusButton.disabled = state.isStarting || state.isLoadingSubjects || !state.activeCycleLoaded
+    || !state.subjects.length || state.pomodoroSeriesRecoveryRequired || state.pomodoroSeriesStorageUnavailable
+    || Boolean(state.pendingCompletionId);
   elements.startFocusButton.textContent = state.isStarting ? "Iniciando foco..." : "Iniciar foco";
   elements.cancelFocusButton.disabled = state.isCancelling || state.isCompleting;
   elements.cancelFocusButton.textContent = state.isCompleting
@@ -461,7 +466,9 @@ function updateTimer() {
     const deadline = startedAt + duration * 1000;
     const remaining = Math.max(0, (deadline - Date.now()) / 1000);
     renderTimer(remaining, duration);
-    if (remaining <= 0 && !state.isCompleting && Date.now() >= state.nextCompletionAttemptAt) {
+    if (remaining <= 0 && !state.isCompleting
+      && !state.pomodoroSeriesRecoveryRequired && !state.pomodoroSeriesStorageUnavailable
+      && Date.now() >= state.nextCompletionAttemptAt) {
       void completeActiveCycle();
     }
     return;
@@ -478,6 +485,12 @@ function updateTimer() {
 }
 
 function renderCycleProgress() {
+  if (state.pomodoroSeriesRecoveryRequired) {
+    elements.cycleCount.textContent = "Indisponível";
+    elements.cycleDots.replaceChildren();
+    elements.cycleDots.setAttribute("aria-label", "Progresso indisponível: estado salvo requer recuperação");
+    return;
+  }
   const goal = state.settings.longBreakAfter;
   const completed = Math.min(state.completedInSeries, goal);
   elements.cycleCount.textContent = `${completed} de ${goal}`;
@@ -491,42 +504,35 @@ function renderCycleProgress() {
   elements.cycleDots.setAttribute("aria-label", `${completed} de ${goal} focos concluídos`);
 }
 
-function startBreak(isLong) {
-  state.activeCycle = null;
-  state.phase = isLong ? "break-long" : "break-short";
-  state.breakDurationSeconds = isLong
-    ? state.settings.longBreakMinutes * 60
-    : state.settings.shortBreakMinutes * 60;
-  state.breakDeadline = Date.now() + state.breakDurationSeconds * 1000;
-  state.nextCompletionAttemptAt = 0;
-  persistPomodoroSeries();
-  elements.timerMessage.textContent = isLong
-    ? "Foco confirmado pelo servidor. Hora de um descanso longo."
-    : "Foco confirmado pelo servidor. Hora de um descanso curto.";
-  showNotice(isLong ? "Foco concluído. Seu descanso longo começou." : "Foco concluído. Seu descanso curto começou.", "success");
-  updateTimer();
-}
-
-function finishBreak(completed = true) {
-  const wasLong = state.phase === "break-long";
-  state.phase = "focus";
-  state.breakDeadline = null;
-  state.breakDurationSeconds = 0;
-  if (wasLong && completed) state.completedInSeries = 0;
-  persistPomodoroSeries();
-  renderCycleProgress();
-  elements.timerMessage.textContent = completed
-    ? "Descanso encerrado. Escolha quando começar o próximo foco."
-    : "Descanso interrompido. Escolha quando começar o próximo foco.";
-  showNotice(completed
-    ? "Descanso concluído. Você pode iniciar um novo foco."
-    : "Descanso interrompido. Você pode iniciar um novo foco.", "info");
-  updateTimer();
+async function finishBreak(completed = true) {
+  if (state.isFinishingBreak || !state.user) return;
+  state.isFinishingBreak = true;
+  const expectedPhase = state.phase;
+  const expectedDeadline = state.breakDeadline;
+  try {
+    await pomodoroSeriesStore.finishBreak(state.user.user_id, {
+      completed,
+      expectedPhase,
+      expectedDeadline,
+    });
+    state.timerMessage = completed
+      ? "Descanso encerrado. Escolha quando começar o próximo foco."
+      : "Descanso interrompido. Escolha quando começar o próximo foco.";
+    showNotice(completed
+      ? "Descanso concluído. Você pode iniciar um novo foco."
+      : "Descanso interrompido. Você pode iniciar um novo foco.", "info");
+  } catch (error) {
+    showNotice(apiMessage(error), "error");
+  } finally {
+    state.isFinishingBreak = false;
+    renderCycleProgress();
+    updateTimer();
+  }
 }
 
 function skipBreak() {
   if (!state.phase.startsWith("break-")) return;
-  finishBreak(state.breakDeadline !== null && state.breakDeadline <= Date.now());
+  void finishBreak(state.breakDeadline !== null && state.breakDeadline <= Date.now());
 }
 
 function makeIdempotencyKey() {
@@ -536,7 +542,9 @@ function makeIdempotencyKey() {
 }
 
 async function startFocus() {
-  if (!state.user || state.activeCycle || !state.activeCycleLoaded || state.phase !== "focus" || state.isStarting) return;
+  if (!state.user || state.activeCycle || !state.activeCycleLoaded || state.phase !== "focus"
+    || state.isStarting || state.pomodoroSeriesRecoveryRequired || state.pomodoroSeriesStorageUnavailable
+    || state.pendingCompletionId) return;
   const subjectId = Number(elements.subjectSelect.value);
   if (!Number.isSafeInteger(subjectId) || subjectId < 1) {
     showNotice("Selecione uma disciplina antes de iniciar o foco.", "error");
@@ -602,11 +610,8 @@ async function synchronizeActiveCycle(expectedId = null) {
     state.activeCycleLoaded = true;
     const cycle = result?.cycle || null;
     if (cycle && cycle.status === "running") {
+      await pomodoroSeriesStore.restoreFocus(state.user.user_id);
       state.activeCycle = cycle;
-      state.phase = "focus";
-      state.breakDeadline = null;
-      state.breakDurationSeconds = 0;
-      persistPomodoroSeries();
       state.timerMessage = expectedId && String(cycle.id) === String(expectedId)
         ? "O servidor ainda informa este foco ativo; nova confirmação será tentada em instantes."
         : "Ciclo ativo restaurado do servidor.";
@@ -619,46 +624,126 @@ async function synchronizeActiveCycle(expectedId = null) {
       state.activeCycle = null;
       state.nextCompletionAttemptAt = 0;
       if (expectedId) {
-        state.phase = "focus";
-        state.breakDeadline = null;
-        state.breakDurationSeconds = 0;
-        persistPomodoroSeries();
         state.timerMessage = "O servidor não informa um foco ativo. Métricas serão sincronizadas sem presumir conclusão.";
         void loadMetrics();
-      } else if (!state.phase.startsWith("break-")) {
+      } else if (state.phase === "focus") {
         state.phase = "focus";
-        state.breakDeadline = null;
         state.timerMessage = "";
       }
     }
     renderSubjectSelect();
     updateTimer();
+    return cycle;
   } catch (error) {
     showNotice(apiMessage(error), "error");
     state.activeCycleLoaded = false;
     state.timerMessage = "Não foi possível consultar o ciclo ativo. Atualize os dados antes de iniciar.";
     renderTimerControls();
     updateTimer();
+    return false;
   }
 }
 
-async function completeActiveCycle() {
-  if (!state.activeCycle || state.isCompleting) return;
-  const cycleId = state.activeCycle.id;
+function schedulePendingCompletionRetry() {
+  window.clearTimeout(state.pendingCompletionRetryTimer);
+  state.pendingCompletionRetryTimer = window.setTimeout(() => {
+    state.pendingCompletionRetryTimer = null;
+    void recoverPendingCompletion();
+  }, 5000);
+}
+
+async function completeCycleById(cycleId) {
+  if (!state.user || state.isCompleting) return;
+  const userId = state.user.user_id;
+  let normalizedId = cycleId;
+  if (typeof normalizedId === "number" && Number.isSafeInteger(normalizedId)) {
+    normalizedId = String(normalizedId);
+  }
+  if (typeof normalizedId !== "string" || !/^[1-9]\d*$/.test(normalizedId)) return;
+
   state.isCompleting = true;
   renderTimerControls();
   try {
-    const result = await apiRequest(`/api/pomodoro/cycles/${encodeURIComponent(cycleId)}/complete`, {
-      method: "POST",
+    const completion = await completePomodoroCycle(pomodoroSeriesStore, userId, normalizedId, {
+      settings: state.settings,
+      sendCompletion: (id) => apiRequest(`/api/pomodoro/cycles/${encodeURIComponent(id)}/complete`, {
+        method: "POST",
+      }),
     });
-    if (result?.ok !== true || result.cycle?.status !== "completed") {
-      throw new ApiError(500, null);
+    if (completion.status === "recovery-required") {
+      state.pomodoroSeriesRecoveryRequired = true;
+      state.timerMessage = "O progresso Pomodoro não pôde ser validado; a conclusão foi bloqueada.";
+      renderCycleProgress();
+      showNotice(state.timerMessage, "error");
+      return;
     }
-    state.completedInSeries += 1;
-    state.timerMessage = "";
-    renderCycleProgress();
-    const needsLongBreak = state.completedInSeries >= state.settings.longBreakAfter;
-    startBreak(needsLongBreak);
+    if (completion.status === "storage-unavailable") {
+      state.nextCompletionAttemptAt = 0;
+      if (completion.confirmed && state.activeCycle && String(state.activeCycle.id) === normalizedId) {
+        state.activeCycle = null;
+        await synchronizeActiveCycle(normalizedId);
+      }
+      state.timerMessage = completion.confirmed
+        ? "O servidor confirmou o ciclo, mas o progresso não pôde ser persistido. A pendência foi mantida para recuperação."
+        : "A conclusão não foi enviada porque o armazenamento local não pôde ser confirmado.";
+      showNotice(state.timerMessage, "error");
+      return;
+    }
+    if (completion.status === "already-processed") {
+      window.clearTimeout(state.pendingCompletionRetryTimer);
+      state.pendingCompletionRetryTimer = null;
+      if (state.activeCycle && String(state.activeCycle.id) === normalizedId) {
+        state.activeCycle = null;
+      }
+      state.nextCompletionAttemptAt = 0;
+      await synchronizeActiveCycle();
+      state.timerMessage = "Este ciclo já estava contabilizado; a sequência não foi incrementada novamente.";
+      showNotice(state.timerMessage, "info");
+      void loadMetrics();
+      return;
+    }
+    if (completion.status === "pending-conflict") {
+      state.timerMessage = "Outra conclusão está pendente e será recuperada antes deste ciclo.";
+      showNotice(state.timerMessage, "error");
+      schedulePendingCompletionRetry();
+      return;
+    }
+    if (completion.status === "pending-missing") {
+      window.clearTimeout(state.pendingCompletionRetryTimer);
+      state.pendingCompletionRetryTimer = null;
+      if (state.activeCycle && String(state.activeCycle.id) === normalizedId) {
+        state.activeCycle = null;
+      }
+      state.nextCompletionAttemptAt = 0;
+      await synchronizeActiveCycle();
+      state.timerMessage = "O servidor confirmou o ciclo, mas a pendência local não existe; a sequência não foi alterada.";
+      showNotice(state.timerMessage, "error");
+      void loadMetrics();
+      return;
+    }
+
+    window.clearTimeout(state.pendingCompletionRetryTimer);
+    state.pendingCompletionRetryTimer = null;
+    if (state.activeCycle && String(state.activeCycle.id) === normalizedId) {
+      state.activeCycle = null;
+      state.nextCompletionAttemptAt = 0;
+    }
+    state.timerMessage = completion.incremented
+      ? completion.series.phase === "break-long"
+        ? "Foco confirmado pelo servidor. Hora de um descanso longo."
+        : "Foco confirmado pelo servidor. Hora de um descanso curto."
+      : "Esta conclusão já estava contabilizada; a sequência foi sincronizada.";
+    if (!completion.persisted) {
+      showNotice("O foco foi confirmado, mas a sequência não pôde ser persistida. A recuperação continuará pendente.", "error");
+    } else if (!completion.incremented) {
+      showNotice("Esta conclusão já havia sido contabilizada; a sequência não foi incrementada novamente.", "info");
+    } else {
+      showNotice(completion.series.phase === "break-long"
+        ? "Foco concluído. Seu descanso longo começou."
+        : "Foco concluído. Seu descanso curto começou.", "success");
+    }
+    await synchronizeActiveCycle();
+    updateTimer();
     void loadMetrics();
   } catch (error) {
     state.nextCompletionAttemptAt = Date.now() + 5000;
@@ -666,10 +751,40 @@ async function completeActiveCycle() {
       ? apiMessage(error)
       : "Não foi possível confirmar a conclusão no servidor. O ciclo permanece sujeito à confirmação.";
     showNotice(apiMessage(error), "error");
-    await synchronizeActiveCycle(cycleId);
+    const activeCycle = await synchronizeActiveCycle(normalizedId);
+    if (error instanceof ApiError && error.status === 409
+      && error.code === "cycle_not_running" && activeCycle !== false
+      && (!activeCycle || String(activeCycle.id) !== normalizedId)) {
+      try {
+        await pomodoroSeriesStore.discardCancelledCompletion(userId, normalizedId);
+        state.timerMessage = "O foco foi cancelado no servidor e não foi contabilizado.";
+        showNotice(state.timerMessage, "info");
+      } catch (storageError) {
+        showNotice(apiMessage(storageError), "error");
+      }
+    } else if (!activeCycle) {
+      schedulePendingCompletionRetry();
+    }
   } finally {
     state.isCompleting = false;
     renderTimerControls();
+  }
+}
+
+async function completeActiveCycle() {
+  if (!state.activeCycle || state.isCompleting) return;
+  await completeCycleById(state.activeCycle.id);
+}
+
+async function recoverPendingCompletion() {
+  if (!state.user || state.isCompleting) return;
+  try {
+    const { series } = await pomodoroSeriesStore.read(state.user.user_id);
+    if (!series?.pendingCompletionId) return;
+    await completeCycleById(series.pendingCompletionId);
+  } catch (error) {
+    showNotice(apiMessage(error), "error");
+    schedulePendingCompletionRetry();
   }
 }
 
@@ -1003,8 +1118,12 @@ async function refreshAppData() {
 }
 
 function setSettingsStatus(message, isError = false) {
-  elements.settingsStatus.textContent = message;
-  elements.settingsStatus.style.color = isError ? "var(--red)" : "";
+  const syncWarning = state.crossTabSynchronizationUnavailable
+    && !message.includes("sincronização entre abas")
+    ? " Sincronização entre abas não garantida sem Web Locks."
+    : "";
+  elements.settingsStatus.textContent = `${message}${syncWarning}`;
+  elements.settingsStatus.style.color = isError || syncWarning ? "var(--red)" : "";
 }
 
 function saveSettings(event) {
@@ -1116,6 +1235,15 @@ function bindEvents() {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) updateTimer();
   });
+  window.addEventListener("storage", (event) => {
+    const userId = state.user?.user_id;
+    if (!userId || event.key !== pomodoroSeriesStorageKey(userId)) return;
+    void pomodoroSeriesStore.read(userId).then(({ series }) => {
+      if (series?.pendingCompletionId) void recoverPendingCompletion();
+    }).catch((error) => {
+      showNotice(apiMessage(error), "error");
+    });
+  });
 }
 
 async function bootstrap() {
@@ -1133,8 +1261,11 @@ async function bootstrap() {
       || (result.user.avatar !== null && typeof result.user.avatar !== "string")) {
       throw new ApiError(500, null);
     }
+    state.user = result.user;
+    await pomodoroSeriesStore.read(result.user.user_id);
     showAppView(result.user);
     await refreshAppData();
+    await recoverPendingCompletion();
     if (oauthNotice && (state.user || oauthNotice.kind === "error")) {
       showNotice(oauthNotice.message, oauthNotice.kind);
     }
@@ -1143,6 +1274,9 @@ async function bootstrap() {
     }
     if (state.pomodoroSeriesStorageUnavailable) {
       showNotice("Não foi possível ler a sequência salva do Pomodoro; ela vale apenas nesta sessão.", "error");
+    }
+    if (state.crossTabSynchronizationUnavailable) {
+      showNotice("Web Locks indisponível: a sincronização entre abas não é garantida.", "error");
     }
   } catch (error) {
     showLoginView();
@@ -1158,6 +1292,9 @@ async function bootstrap() {
     }
     if (state.pomodoroSeriesStorageUnavailable) {
       showNotice("Não foi possível ler a sequência salva do Pomodoro; ela vale apenas nesta sessão.", "error");
+    }
+    if (state.crossTabSynchronizationUnavailable) {
+      showNotice("Web Locks indisponível: a sincronização entre abas não é garantida.", "error");
     }
   }
 }
